@@ -69,3 +69,5 @@ You can adjust the physics constants in `state.rs` within the `update()` method:
 * `gravity`: Adjusts the downward pull.
 * `half_size`: Changes the dimensions of the entities.
 * `wall_bounce` / `floor_bounce`: Controls how much energy is kept after hitting a boundary.
+
+<img src="image.png">
