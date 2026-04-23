@@ -21,20 +21,33 @@ pub struct Entity {
 }
 
 const VERTICES: &[Vertex] = &[
+    // 첫 번째 삼각형
     Vertex {
-        position: [0.0, 0.5, 0.0],
+        position: [-0.05, 0.05, 0.0],
         color: [1.0, 0.0, 0.0],
     },
     Vertex {
-        position: [-0.5, -0.5, 0.0],
+        position: [-0.05, -0.05, 0.0],
         color: [0.0, 1.0, 0.0],
     },
     Vertex {
-        position: [0.5, -0.5, 0.0],
+        position: [0.05, -0.05, 0.0],
         color: [0.0, 0.0, 1.0],
     },
+    // 두 번째 삼각형
+    Vertex {
+        position: [-0.05, 0.05, 0.0],
+        color: [1.0, 0.0, 0.0],
+    },
+    Vertex {
+        position: [0.05, -0.05, 0.0],
+        color: [0.0, 0.0, 1.0],
+    },
+    Vertex {
+        position: [0.05, 0.05, 0.0],
+        color: [0.8, 0.8, 0.0],
+    },
 ];
-
 // 최대 인스턴스 개수 설정
 const MAX_INSTANCES: usize = 1000;
 
@@ -236,40 +249,77 @@ impl<'a> WgpuState<'a> {
             self.surface.configure(&self.device, &self.config);
         }
     }
-
     pub fn update(&mut self) {
         let mut instance_data = Vec::new();
 
-        // 물리 상수 설정
+        // 물리 및 충돌 관련 상수 설정
+        let half_size = 0.05; // 사각형 절반 크기
         let gravity = -0.001; // 중력
-        let friction = 0.98; // 공기 저항 (매 프레임 속도 유지 비율)
+        let friction = 0.99; // 공기 저항
         let wall_bounce = -0.7; // 벽 충돌 반발 계수
         let floor_bounce = -0.6; // 바닥 충돌 반발 계수
-        let ground_friction = 0.7; // 바닥 마찰력 (낮을수록 빨리 멈춤)
+        let ground_friction = 0.7; // 바닥 마찰력
 
+        // 1. 물체끼리의 충돌 판정 (AABB 방식)
+        let entities_len = self.entities.len();
+        for i in 0..entities_len {
+            for j in (i + 1)..entities_len {
+                // 두 사각형 중심 사이의 거리 계산
+                let dx = self.entities[j].position[0] - self.entities[i].position[0];
+                let dy = self.entities[j].position[1] - self.entities[i].position[1];
+
+                // 충돌 감지 조건: x축과 y축 모두 겹쳐야 함
+                if dx.abs() < (half_size * 2.0) && dy.abs() < (half_size * 2.0) {
+                    let overlap_x = (half_size * 2.0) - dx.abs();
+                    let overlap_y = (half_size * 2.0) - dy.abs();
+
+                    // 더 적게 겹친 축을 기준으로 밀어내기 및 속도 반전
+                    if overlap_x < overlap_y {
+                        let sign = if dx > 0.0 { 1.0 } else { -1.0 };
+                        self.entities[i].position[0] -= sign * overlap_x * 0.5;
+                        self.entities[j].position[0] += sign * overlap_x * 0.5;
+
+                        // X축 속도 교환 및 에너지 감쇄
+                        let temp_v = self.entities[i].velocity[0];
+                        self.entities[i].velocity[0] = self.entities[j].velocity[0] * 0.8;
+                        self.entities[j].velocity[0] = temp_v * 0.8;
+                    } else {
+                        let sign = if dy > 0.0 { 1.0 } else { -1.0 };
+                        self.entities[i].position[1] -= sign * overlap_y * 0.5;
+                        self.entities[j].position[1] += sign * overlap_y * 0.5;
+
+                        // Y축 속도 교환 및 에너지 감쇄
+                        let temp_v = self.entities[i].velocity[1];
+                        self.entities[i].velocity[1] = self.entities[j].velocity[1] * 0.8;
+                        self.entities[j].velocity[1] = temp_v * 0.8;
+                    }
+                }
+            }
+        }
+
+        // 2. 개별 엔티티 물리 법칙 및 경계 충돌 적용
         for (i, entity) in self.entities.iter_mut().enumerate() {
+            // 드래그 중인 엔티티는 마우스 위치를 강제로 따라감
             if Some(i) == self.dragged_entity_idx {
                 entity.position = self.last_mouse_pos;
                 entity.velocity = [0.0, 0.0];
             } else {
-                // 1. 기본 물리 법칙 적용
-                entity.velocity[1] += gravity; // 중력 적용
-                entity.velocity[0] *= friction; // 공기 저항 적용
+                // 기본 물리 연산
+                entity.velocity[1] += gravity; // 중력
+                entity.velocity[0] *= friction; // 저항
                 entity.velocity[1] *= friction;
 
                 entity.position[0] += entity.velocity[0];
                 entity.position[1] += entity.velocity[1];
 
-                // 2. 바닥 충돌 처리 (미끄러짐 방지 핵심)
+                // 바닥 충돌 처리
                 if entity.position[1] < -0.9 {
                     entity.position[1] = -0.9;
-                    entity.velocity[1] *= floor_bounce; // 위로 튕김
-
-                    // 바닥에 닿아있을 때 좌우 속도를 크게 줄임
-                    entity.velocity[0] *= ground_friction;
+                    entity.velocity[1] *= floor_bounce;
+                    entity.velocity[0] *= ground_friction; // 바닥 마찰
                 }
 
-                // 3. 좌우 벽 충돌 처리
+                // 좌우 벽 충돌 처리
                 if entity.position[0] < -1.0 {
                     entity.position[0] = -1.0;
                     entity.velocity[0] *= wall_bounce;
@@ -279,12 +329,13 @@ impl<'a> WgpuState<'a> {
                 }
             }
 
+            // GPU로 보낼 데이터 준비
             instance_data.push(InstanceRaw {
                 position: entity.position,
             });
         }
 
-        // GPU 버퍼 업데이트 로직 (기존 유지)
+        // 3. GPU 인스턴스 버퍼 업데이트
         if !instance_data.is_empty() {
             self.queue.write_buffer(
                 &self.instance_buffer,
@@ -294,7 +345,7 @@ impl<'a> WgpuState<'a> {
         }
     }
     pub fn try_grab(&mut self) {
-        let grab_threshold = 0.5; // 클릭 인정 범위
+        let grab_threshold = 0.1; // 클릭 인정 범위
         for (i, entity) in self.entities.iter().enumerate() {
             let dx = entity.position[0] - self.last_mouse_pos[0];
             let dy = entity.position[1] - self.last_mouse_pos[1];
