@@ -37,6 +37,8 @@ pub struct WgpuState<'a> {
     pub camera_bind_group: wgpu::BindGroup,
     pub offset: [f32; 2],
     pub velocity: [f32; 2],
+    pub is_dragging: bool,
+    pub last_mouse_pos: [f32; 2],
 }
 
 impl<'a> WgpuState<'a> {
@@ -186,6 +188,8 @@ impl<'a> WgpuState<'a> {
             camera_bind_group,
             offset,
             velocity: [0.0, 0.0],
+            is_dragging: false,
+            last_mouse_pos: [0.0, 0.0],
         }
     }
 
@@ -199,23 +203,32 @@ impl<'a> WgpuState<'a> {
 
     // 위치 갱신 로직 (시간에 따라 회전)
     pub fn update(&mut self) {
-        let gravity = -0.001; // 중력 가속도 (아래 방향이므로 음수)
-        let bounce = -0.7; // 바닥에 닿았을 때 튕기는 정도 (에너지 손실)
+        if self.is_dragging {
+            // 드래그 중에는 속도가 0이며 중력이 작용하지 않음
+            self.velocity = [0.0, 0.0];
+        } else {
+            let gravity = -0.001;
+            let bounce = -0.7;
+            let friction = 0.99; // 공기 저항 추가
 
-        // 1. 속도에 중력 더하기 (v = v0 + at)
-        self.velocity[1] += gravity;
+            self.velocity[1] += gravity;
+            self.offset[0] += self.velocity[0];
+            self.offset[1] += self.velocity[1];
 
-        // 2. 위치에 속도 반영 (s = s0 + vt)
-        self.offset[1] += self.velocity[1];
+            self.velocity[0] *= friction; // 좌우 마찰력
 
-        // 3. 바닥 충돌 감지 (화면 하단 경계값은 약 -0.8 정도로 설정)
-        // 삼각형의 중심 좌표 기준이므로 정점 위치를 고려해 조절합니다.
-        if self.offset[1] < -0.5 {
-            self.offset[1] = -0.5; // 위치 고정
-            self.velocity[1] *= bounce; // 방향 반전 및 속도 감소
+            // 바닥 충돌
+            if self.offset[1] < -0.8 {
+                self.offset[1] = -0.8;
+                self.velocity[1] *= bounce;
+            }
+            // 벽 충돌 (좌우)
+            if self.offset[0].abs() > 0.9 {
+                self.offset[0] = 0.9 * self.offset[0].signum();
+                self.velocity[0] *= bounce;
+            }
         }
 
-        // 4. GPU 버퍼 업데이트
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&self.offset));
     }

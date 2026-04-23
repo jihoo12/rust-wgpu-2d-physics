@@ -31,6 +31,7 @@ impl<'a> ApplicationHandler for App<'a> {
                     state.resize(size);
                 }
             }
+
             WindowEvent::RedrawRequested => {
                 if let (Some(state), Some(window)) = (&mut self.state, &self.window) {
                     state.update();
@@ -54,6 +55,38 @@ impl<'a> ApplicationHandler for App<'a> {
                         }
                     }
                     window.request_redraw();
+                }
+            }
+            WindowEvent::MouseInput {
+                state: element_state,
+                button: winit::event::MouseButton::Left,
+                ..
+            } => {
+                if let (Some(state), Some(window)) = (&mut self.state, &self.window) {
+                    if element_state == winit::event::ElementState::Pressed {
+                        state.is_dragging = true;
+                    } else {
+                        state.is_dragging = false;
+                        // 던지는 힘은 마지막 마우스 이동 속도에 비례하도록 구현 가능
+                    }
+                }
+            }
+
+            WindowEvent::CursorMoved { position, .. } => {
+                if let (Some(state), Some(window)) = (&mut self.state, &self.window) {
+                    let size = window.inner_size();
+                    // 화면 좌표를 -1.0 ~ 1.0 좌표계로 변환
+                    let new_x = (position.x as f32 / size.width as f32) * 2.0 - 1.0;
+                    let new_y = -((position.y as f32 / size.height as f32) * 2.0 - 1.0);
+
+                    if state.is_dragging {
+                        // 드래그 중이면 속도 계산 (현재 위치 - 이전 위치)
+                        state.velocity[0] = (new_x - state.offset[0]) * 0.5;
+                        state.velocity[1] = (new_y - state.offset[1]) * 0.5;
+
+                        state.offset[0] = new_x;
+                        state.offset[1] = new_y;
+                    }
                 }
             }
             _ => (),
