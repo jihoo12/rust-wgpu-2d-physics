@@ -33,6 +33,7 @@ impl<'a> ApplicationHandler for App<'a> {
             }
             WindowEvent::RedrawRequested => {
                 if let (Some(state), Some(window)) = (&mut self.state, &self.window) {
+                    state.update();
                     match state.render() {
                         wgpu::CurrentSurfaceTexture::Success(frame) => {
                             state.draw(&frame);
