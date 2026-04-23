@@ -9,6 +9,7 @@ var<uniform> camera: CameraUniform;
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) color: vec3<f32>,
+    @location(2) instance_pos: vec2<f32>, // 인스턴스 버퍼에서 오는 데이터
 };
 
 struct VertexOutput {
@@ -19,8 +20,8 @@ struct VertexOutput {
 @vertex
 fn vs_main(model: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    // 원래 좌표에 offset(이동 값)을 더해줍니다.
-    out.clip_position = vec4<f32>(model.position.x + camera.offset.x, model.position.y + camera.offset.y, model.position.z, 1.0);
+    // 원래 모양 좌표에 인스턴스 개별 위치를 더함
+    out.clip_position = vec4<f32>(model.position.xy + model.instance_pos, model.position.z, 1.0);
     out.color = model.color;
     return out;
 }

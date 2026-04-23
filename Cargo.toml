@@ -8,3 +8,4 @@ wgpu = "29.0"
 winit = "0.30"
 pollster = "0.3" # 비동기 main 실행용
 bytemuck = { version = "1.13", features = ["derive"] }
+rand = "0.10.1"

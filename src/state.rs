@@ -9,6 +9,17 @@ pub struct Vertex {
     pub color: [f32; 3],
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct InstanceRaw {
+    position: [f32; 2],
+}
+
+pub struct Entity {
+    pub position: [f32; 2],
+    pub velocity: [f32; 2],
+}
+
 const VERTICES: &[Vertex] = &[
     Vertex {
         position: [0.0, 0.5, 0.0],
@@ -24,6 +35,9 @@ const VERTICES: &[Vertex] = &[
     },
 ];
 
+// 최대 인스턴스 개수 설정
+const MAX_INSTANCES: usize = 1000;
+
 pub struct WgpuState<'a> {
     pub surface: wgpu::Surface<'a>,
     pub device: wgpu::Device,
@@ -32,13 +46,15 @@ pub struct WgpuState<'a> {
     pub render_pipeline: wgpu::RenderPipeline,
     pub vertex_buffer: wgpu::Buffer,
     pub num_vertices: u32,
-    // 추가된 필드들
     pub camera_buffer: wgpu::Buffer,
     pub camera_bind_group: wgpu::BindGroup,
     pub offset: [f32; 2],
     pub velocity: [f32; 2],
     pub is_dragging: bool,
     pub last_mouse_pos: [f32; 2],
+    pub entities: Vec<Entity>,
+    pub instance_buffer: wgpu::Buffer,
+    pub dragged_entity_idx: Option<usize>,
 }
 
 impl<'a> WgpuState<'a> {
@@ -78,7 +94,7 @@ impl<'a> WgpuState<'a> {
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
 
-        // 1. 유니폼 버퍼 생성 (이동값 저장용)
+        // 1. 유니폼 버퍼 및 바인드 그룹 설정
         let offset = [0.0f32, 0.0f32];
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Camera Buffer"),
@@ -86,7 +102,6 @@ impl<'a> WgpuState<'a> {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        // 2. 바인드 그룹 레이아웃 생성
         let camera_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[wgpu::BindGroupLayoutEntry {
@@ -102,7 +117,6 @@ impl<'a> WgpuState<'a> {
                 label: Some("camera_bind_group_layout"),
             });
 
-        // 3. 바인드 그룹 생성
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &camera_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
@@ -112,6 +126,7 @@ impl<'a> WgpuState<'a> {
             label: Some("camera_bind_group"),
         });
 
+        // 2. 정점 버퍼 및 인스턴스 버퍼 생성
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
             contents: bytemuck::cast_slice(VERTICES),
@@ -119,6 +134,15 @@ impl<'a> WgpuState<'a> {
         });
         let num_vertices = VERTICES.len() as u32;
 
+        // 인스턴스 데이터를 담을 빈 버퍼를 미리 생성합니다.
+        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Instance Buffer"),
+            size: (std::mem::size_of::<InstanceRaw>() * MAX_INSTANCES) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // 3. 레이아웃 설정
         let vertex_buffer_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -136,7 +160,16 @@ impl<'a> WgpuState<'a> {
             ],
         };
 
-        // 에러 해결 1: bind_group_layouts에 Some() 사용
+        let instance_buffer_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance, // 인스턴스 단위 데이터 업데이트
+            attributes: &[wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 2,
+                format: wgpu::VertexFormat::Float32x2,
+            }],
+        };
+
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
@@ -150,7 +183,7 @@ impl<'a> WgpuState<'a> {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[vertex_buffer_layout],
+                buffers: &[vertex_buffer_layout, instance_buffer_layout],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -175,7 +208,7 @@ impl<'a> WgpuState<'a> {
             cache: None,
         });
 
-        // 에러 해결 2: 모든 필드 초기화
+        // 4. 필드 초기화 (에러 해결)
         Self {
             surface,
             device,
@@ -190,6 +223,9 @@ impl<'a> WgpuState<'a> {
             velocity: [0.0, 0.0],
             is_dragging: false,
             last_mouse_pos: [0.0, 0.0],
+            entities: Vec::new(), // 빈 벡터로 시작
+            instance_buffer,      // 생성한 버퍼 할당
+            dragged_entity_idx: None,
         }
     }
 
@@ -201,36 +237,77 @@ impl<'a> WgpuState<'a> {
         }
     }
 
-    // 위치 갱신 로직 (시간에 따라 회전)
     pub fn update(&mut self) {
-        if self.is_dragging {
-            // 드래그 중에는 속도가 0이며 중력이 작용하지 않음
-            self.velocity = [0.0, 0.0];
-        } else {
-            let gravity = -0.001;
-            let bounce = -0.7;
-            let friction = 0.99; // 공기 저항 추가
+        let mut instance_data = Vec::new();
 
-            self.velocity[1] += gravity;
-            self.offset[0] += self.velocity[0];
-            self.offset[1] += self.velocity[1];
+        // 물리 상수 설정
+        let gravity = -0.001; // 중력
+        let friction = 0.98; // 공기 저항 (매 프레임 속도 유지 비율)
+        let wall_bounce = -0.7; // 벽 충돌 반발 계수
+        let floor_bounce = -0.6; // 바닥 충돌 반발 계수
+        let ground_friction = 0.7; // 바닥 마찰력 (낮을수록 빨리 멈춤)
 
-            self.velocity[0] *= friction; // 좌우 마찰력
+        for (i, entity) in self.entities.iter_mut().enumerate() {
+            if Some(i) == self.dragged_entity_idx {
+                entity.position = self.last_mouse_pos;
+                entity.velocity = [0.0, 0.0];
+            } else {
+                // 1. 기본 물리 법칙 적용
+                entity.velocity[1] += gravity; // 중력 적용
+                entity.velocity[0] *= friction; // 공기 저항 적용
+                entity.velocity[1] *= friction;
 
-            // 바닥 충돌
-            if self.offset[1] < -0.8 {
-                self.offset[1] = -0.8;
-                self.velocity[1] *= bounce;
+                entity.position[0] += entity.velocity[0];
+                entity.position[1] += entity.velocity[1];
+
+                // 2. 바닥 충돌 처리 (미끄러짐 방지 핵심)
+                if entity.position[1] < -0.9 {
+                    entity.position[1] = -0.9;
+                    entity.velocity[1] *= floor_bounce; // 위로 튕김
+
+                    // 바닥에 닿아있을 때 좌우 속도를 크게 줄임
+                    entity.velocity[0] *= ground_friction;
+                }
+
+                // 3. 좌우 벽 충돌 처리
+                if entity.position[0] < -1.0 {
+                    entity.position[0] = -1.0;
+                    entity.velocity[0] *= wall_bounce;
+                } else if entity.position[0] > 1.0 {
+                    entity.position[0] = 1.0;
+                    entity.velocity[0] *= wall_bounce;
+                }
             }
-            // 벽 충돌 (좌우)
-            if self.offset[0].abs() > 0.9 {
-                self.offset[0] = 0.9 * self.offset[0].signum();
-                self.velocity[0] *= bounce;
-            }
+
+            instance_data.push(InstanceRaw {
+                position: entity.position,
+            });
         }
 
-        self.queue
-            .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&self.offset));
+        // GPU 버퍼 업데이트 로직 (기존 유지)
+        if !instance_data.is_empty() {
+            self.queue.write_buffer(
+                &self.instance_buffer,
+                0,
+                bytemuck::cast_slice(&instance_data),
+            );
+        }
+    }
+    pub fn try_grab(&mut self) {
+        let grab_threshold = 0.5; // 클릭 인정 범위
+        for (i, entity) in self.entities.iter().enumerate() {
+            let dx = entity.position[0] - self.last_mouse_pos[0];
+            let dy = entity.position[1] - self.last_mouse_pos[1];
+            let distance = (dx * dx + dy * dy).sqrt();
+
+            if distance < grab_threshold {
+                self.dragged_entity_idx = Some(i);
+                self.is_dragging = true;
+                return;
+            }
+        }
+        // 아무것도 못 잡았으면 새로 생성 (기존 클릭 생성 로직과 통합 가능)
+        self.add_entity(self.last_mouse_pos[0], self.last_mouse_pos[1]);
     }
 
     pub fn render(&self) -> wgpu::CurrentSurfaceTexture {
@@ -271,12 +348,24 @@ impl<'a> WgpuState<'a> {
             });
 
             rpass.set_pipeline(&self.render_pipeline);
-            // 바인드 그룹 설정 필수!
             rpass.set_bind_group(0, &self.camera_bind_group, &[]);
             rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            rpass.draw(0..self.num_vertices, 0..1);
+            rpass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+            rpass.draw(0..self.num_vertices, 0..self.entities.len() as u32);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
+    }
+    pub fn add_entity(&mut self, x: f32, y: f32) {
+        // 최대 인스턴스 개수를 넘지 않도록 체크
+        if self.entities.len() < MAX_INSTANCES {
+            self.entities.push(Entity {
+                position: [x, y],
+                velocity: [
+                    (rand::random::<f32>() - 0.5) * 0.05, // 좌우로 랜덤하게 튀게 설정
+                    0.02,                                 // 약간 위로 솟구치며 생성
+                ],
+            });
+        }
     }
 }

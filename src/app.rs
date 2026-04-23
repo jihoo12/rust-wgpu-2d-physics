@@ -62,31 +62,34 @@ impl<'a> ApplicationHandler for App<'a> {
                 button: winit::event::MouseButton::Left,
                 ..
             } => {
-                if let (Some(state), Some(window)) = (&mut self.state, &self.window) {
+                if let Some(state) = &mut self.state {
                     if element_state == winit::event::ElementState::Pressed {
-                        state.is_dragging = true;
+                        state.try_grab(); // 잡기 시도 (없으면 생성)
                     } else {
                         state.is_dragging = false;
-                        // 던지는 힘은 마지막 마우스 이동 속도에 비례하도록 구현 가능
+                        state.dragged_entity_idx = None; // 놓기
                     }
                 }
             }
 
+            // app.rs의 CursorMoved 내부
             WindowEvent::CursorMoved { position, .. } => {
-                if let (Some(state), Some(window)) = (&mut self.state, &self.window) {
-                    let size = window.inner_size();
-                    // 화면 좌표를 -1.0 ~ 1.0 좌표계로 변환
+                if let Some(state) = &mut self.state {
+                    let size = self.window.as_ref().unwrap().inner_size();
                     let new_x = (position.x as f32 / size.width as f32) * 2.0 - 1.0;
                     let new_y = -((position.y as f32 / size.height as f32) * 2.0 - 1.0);
 
+                    // [추가] 드래그 중일 때 놓는 순간의 속도를 위해 미리 계산
                     if state.is_dragging {
-                        // 드래그 중이면 속도 계산 (현재 위치 - 이전 위치)
-                        state.velocity[0] = (new_x - state.offset[0]) * 0.5;
-                        state.velocity[1] = (new_y - state.offset[1]) * 0.5;
-
-                        state.offset[0] = new_x;
-                        state.offset[1] = new_y;
+                        if let Some(idx) = state.dragged_entity_idx {
+                            state.entities[idx].velocity[0] =
+                                (new_x - state.last_mouse_pos[0]) * 0.5;
+                            state.entities[idx].velocity[1] =
+                                (new_y - state.last_mouse_pos[1]) * 0.5;
+                        }
                     }
+
+                    state.last_mouse_pos = [new_x, new_y];
                 }
             }
             _ => (),
